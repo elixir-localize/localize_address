@@ -97,11 +97,18 @@ defmodule Localize.Address.Formatter do
   end
 
   defp do_format(address, territory_code, data, extra_bindings \\ %{}) do
+    # Build initial bindings to check for territory remapping
+    initial_bindings =
+      build_bindings(address)
+      |> Map.merge(extra_bindings)
+
+    # Remap dependent territories (e.g., NL→CW for Curaçao, CN→MO for Macau)
+    {territory_code, initial_bindings} = remap_territory(territory_code, initial_bindings, data)
+
     country_config = resolve_country_config(territory_code, data)
 
     bindings =
-      build_bindings(address)
-      |> Map.merge(extra_bindings)
+      initial_bindings
       |> apply_add_component_bindings(country_config)
       |> apply_change_country_bindings(country_config)
       |> apply_component_aliases(data)
@@ -151,6 +158,71 @@ defmodule Localize.Address.Formatter do
 
     {:ok, result}
   end
+
+  # ── Territory remapping ─────────────────────────────────────────
+
+  # Remap dependent territories based on state/region values.
+  # Matches the Perl reference's _determine_country_code behavior.
+
+  # Netherlands: Curaçao, Aruba, Sint Maarten → use their own templates
+  defp remap_territory("NL", bindings, _data) do
+    state = Map.get(bindings, "state", "")
+
+    cond do
+      String.downcase(state) == "curaçao" or String.downcase(state) == "curacao" ->
+        {"CW", Map.put(bindings, "country", "Curaçao")}
+
+      String.match?(state, ~r/^aruba/i) ->
+        {"AW", Map.put(bindings, "country", "Aruba")}
+
+      String.match?(state, ~r/^sint maarten/i) ->
+        {"SX", Map.put(bindings, "country", "Sint Maarten")}
+
+      String.match?(state, ~r/^bonaire/i) ->
+        {"BQ", Map.put(bindings, "country", state)}
+
+      true ->
+        {"NL", bindings}
+    end
+  end
+
+  # China: Macau and Hong Kong SARs should use a standard (non-reversed)
+  # template. Remap to a dummy code that falls through to the default
+  # template, while setting the region/SAR name as a visible component.
+  defp remap_territory("CN", bindings, _data) do
+    region = Map.get(bindings, "region", "")
+    state = Map.get(bindings, "state", "")
+
+    cond do
+      String.match?(region, ~r/^macau/i) or String.match?(state, ~r/^macau/i) ->
+        sar_name = if region != "", do: region, else: state
+
+        bindings =
+          bindings
+          |> Map.put("country", "China")
+          |> Map.put("city", sar_name)
+          |> Map.delete("region")
+
+        # Use default template (no CN-specific reverse ordering)
+        {"_DEFAULT", bindings}
+
+      String.match?(region, ~r/^hong kong/i) or String.match?(state, ~r/^hong kong/i) ->
+        sar_name = if region != "", do: region, else: state
+
+        bindings =
+          bindings
+          |> Map.put("country", "China")
+          |> Map.put("city", sar_name)
+          |> Map.delete("region")
+
+        {"_DEFAULT", bindings}
+
+      true ->
+        {"CN", bindings}
+    end
+  end
+
+  defp remap_territory(territory_code, bindings, _data), do: {territory_code, bindings}
 
   # ── Country config resolution ──────────────────────────────────
 

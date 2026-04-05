@@ -246,9 +246,21 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
     vars = Regex.scan(~r/\{\{\{(\w+)\}\}\}/, trimmed) |> Enum.map(fn [_, name] -> name end)
 
     case vars do
-      [] -> nil
-      [single] -> single
-      _multiple -> {:compound, extract_compound_template(trimmed)}
+      [] ->
+        nil
+
+      [single] ->
+        # Check if there's literal text beyond just the variable (e.g., ", {{{quarter}}}")
+        stripped = Regex.replace(~r/\{\{\{\w+\}\}\}/, trimmed, "") |> String.trim()
+
+        if stripped == "" do
+          single
+        else
+          {:compound, extract_compound_template(trimmed)}
+        end
+
+      _multiple ->
+        {:compound, extract_compound_template(trimmed)}
     end
   end
 
