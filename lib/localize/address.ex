@@ -19,6 +19,22 @@ defmodule Localize.Address do
 
   @type t :: Address.t()
 
+  @titlecase_fields [
+    :attention,
+    :house,
+    :road,
+    :neighbourhood,
+    :city,
+    :municipality,
+    :county,
+    :state_district,
+    :state,
+    :territory,
+    :island,
+    :archipelago,
+    :continent
+  ]
+
   @libpostal_label_map %{
     "house" => :attention,
     "house_number" => :house_number,
@@ -103,10 +119,76 @@ defmodule Localize.Address do
     case Nif.parse(address_string, "") do
       {:ok, components} ->
         address = build_address(components, address_string, territory_code)
+
+        address =
+          if Keyword.get(options, :capitalize, false) do
+            capitalize(address, options)
+          else
+            address
+          end
+
         {:ok, address}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Capitalizes the text fields of an address struct.
+
+  Applies Unicode-aware titlecase to place names, street names, and
+  administrative region fields. Postcodes are uppercased. House numbers,
+  territory codes, and the raw input string are left unchanged.
+
+  ### Arguments
+
+  * `address` is a `Localize.Address.Address` struct.
+
+  ### Options
+
+  * `:locale` is a locale identifier passed through to
+    `Unicode.String.titlecase/2` for locale-specific casing rules
+    (e.g., Dutch "ij" → "IJ", Turkish dotted-I handling).
+
+  ### Returns
+
+  * A new `Localize.Address.Address` struct with capitalized fields.
+
+  ### Examples
+
+      iex> address = %Localize.Address.Address{
+      ...>   road: "hamilton avenue",
+      ...>   city: "palo alto",
+      ...>   postcode: "sw1a 2aa"
+      ...> }
+      iex> capitalized = Localize.Address.capitalize(address)
+      iex> capitalized.road
+      "Hamilton Avenue"
+      iex> capitalized.city
+      "Palo Alto"
+      iex> capitalized.postcode
+      "SW1A 2AA"
+
+  """
+  @spec capitalize(t(), keyword()) :: t()
+  def capitalize(%Address{} = address, options \\ []) do
+    locale = Keyword.get(options, :locale)
+    titlecase_options = if locale, do: [locale: locale], else: []
+
+    updated =
+      Enum.reduce(@titlecase_fields, address, fn field, acc ->
+        case Map.get(acc, field) do
+          nil -> acc
+          "" -> acc
+          value -> Map.put(acc, field, Unicode.String.titlecase(value, titlecase_options))
+        end
+      end)
+
+    case updated.postcode do
+      nil -> updated
+      "" -> updated
+      postcode -> %{updated | postcode: String.upcase(postcode)}
     end
   end
 

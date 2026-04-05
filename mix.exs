@@ -22,6 +22,7 @@ defmodule LocalizeAddress.MixProject do
   defp deps do
     [
       {:localize, path: "../localize"},
+      {:unicode_string, path: "../unicode_string"},
       {:elixir_make, "~> 0.4", runtime: false},
       {:yaml_elixir, "~> 2.9", runtime: false}
     ]
