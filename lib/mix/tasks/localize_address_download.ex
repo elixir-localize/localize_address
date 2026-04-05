@@ -84,7 +84,7 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
   defp download!(url) do
     case :httpc.request(:get, {String.to_charlist(url), []}, [{:ssl, ssl_options()}], []) do
       {:ok, {{_, 200, _}, _headers, body}} ->
-        to_string(body)
+        IO.iodata_to_binary(body)
 
       {:ok, {{_, status, _}, _headers, _body}} ->
         Mix.raise("Failed to download #{url}: HTTP #{status}")
@@ -219,7 +219,7 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
             candidates =
               inner
               |> String.split("||")
-              |> Enum.map(&extract_variable_name/1)
+              |> Enum.map(&extract_candidate/1)
               |> Enum.reject(&is_nil/1)
 
             var_name = "first_#{current_counter}"
@@ -237,11 +237,26 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
     Regex.replace(~r/\{\{\{(\w+)\}\}\}/, text, "{$\\1}")
   end
 
-  defp extract_variable_name(text) do
-    case Regex.run(~r/\{\{\{(\w+)\}\}\}/, String.trim(text)) do
-      [_, name] -> name
-      _ -> nil
+  # Extract candidate from a first-of option. A candidate can be a single
+  # variable name (string) or a compound candidate (list of {var, separator}
+  # tuples) when multiple variables appear in one option like
+  # `{{{house_number}}} {{{road}}}`.
+  defp extract_candidate(text) do
+    trimmed = String.trim(text)
+    vars = Regex.scan(~r/\{\{\{(\w+)\}\}\}/, trimmed) |> Enum.map(fn [_, name] -> name end)
+
+    case vars do
+      [] -> nil
+      [single] -> single
+      _multiple -> {:compound, extract_compound_template(trimmed)}
     end
+  end
+
+  # Preserve the template structure for compound candidates so that
+  # separators between variables are maintained at render time.
+  defp extract_compound_template(text) do
+    Regex.replace(~r/\{\{\{(\w+)\}\}\}/, text, "{$\\1}")
+    |> String.trim()
   end
 
   defp compile_replace(replacements) when is_list(replacements) do

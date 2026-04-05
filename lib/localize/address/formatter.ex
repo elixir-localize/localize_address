@@ -98,14 +98,17 @@ defmodule Localize.Address.Formatter do
 
   defp do_format(address, territory_code, data, extra_bindings \\ %{}) do
     country_config = resolve_country_config(territory_code, data)
-    address = apply_add_component(address, country_config)
-    address = apply_change_country(address, country_config)
 
     bindings =
       build_bindings(address)
       |> Map.merge(extra_bindings)
+      |> apply_add_component_bindings(country_config)
+      |> apply_change_country_bindings(country_config)
       |> apply_component_aliases(data)
+      |> sanitize_components()
+      |> sanitize_postcode()
       |> apply_component_replace(country_config)
+      |> normalize_washington_dc(territory_code)
       |> add_state_code(territory_code, data)
       |> add_county_code(territory_code, data)
       |> apply_attention(data)
@@ -115,8 +118,14 @@ defmodule Localize.Address.Formatter do
       if minimal_components?(bindings) do
         {country_config.address_template, country_config.address_first_of}
       else
-        {country_config.fallback_template || country_config.address_template,
-         country_config.fallback_first_of || country_config.address_first_of}
+        fallback_t = country_config.fallback_template
+        fallback_fo = country_config.fallback_first_of
+
+        if fallback_t && fallback_t != "" do
+          {fallback_t, fallback_fo || %{}}
+        else
+          {country_config.address_template, country_config.address_first_of}
+        end
       end
 
     result = render_template(template, first_of, bindings)
@@ -136,6 +145,7 @@ defmodule Localize.Address.Formatter do
       end
 
     result = apply_replace(result, country_config.replace)
+    result = clean_output(result)
     result = apply_postformat_replace(result, country_config.postformat_replace)
     result = clean_output(result)
 
@@ -154,6 +164,8 @@ defmodule Localize.Address.Formatter do
 
         Map.merge(parent_config, config, fn
           _key, parent_value, nil -> parent_value
+          _key, parent_value, [] -> parent_value
+          _key, parent_value, %{} -> parent_value
           _key, _parent_value, child_value -> child_value
         end)
 
@@ -162,20 +174,16 @@ defmodule Localize.Address.Formatter do
     end
   end
 
-  # ── Pre-processing ─────────────────────────────────────────────
+  # ── Pre-processing (operates on bindings map) ───────────────────
 
-  defp apply_add_component(address, %{add_component: components}) when is_list(components) do
-    Enum.reduce(components, address, fn
+  # Apply add_component rules to the bindings map. Only sets values
+  # for keys that are not already present.
+  defp apply_add_component_bindings(bindings, %{add_component: components})
+       when is_list(components) do
+    Enum.reduce(components, bindings, fn
       component, acc when is_map(component) ->
         Enum.reduce(component, acc, fn {field, value}, inner_acc ->
-          field_atom = safe_to_atom(field)
-
-          if field_atom && Map.has_key?(inner_acc, field_atom) &&
-               is_nil(Map.get(inner_acc, field_atom)) do
-            Map.put(inner_acc, field_atom, value)
-          else
-            inner_acc
-          end
+          Map.put_new(inner_acc, field, value)
         end)
 
       _, acc ->
@@ -183,25 +191,22 @@ defmodule Localize.Address.Formatter do
     end)
   end
 
-  defp apply_add_component(address, _config), do: address
+  defp apply_add_component_bindings(bindings, _config), do: bindings
 
-  defp apply_change_country(address, %{change_country: replacement})
+  # Apply change_country by interpolating $component references in
+  # the country binding value. Operates on bindings so it has access
+  # to all component values including extra_bindings.
+  defp apply_change_country_bindings(bindings, %{change_country: replacement})
        when is_binary(replacement) do
-    # Interpolate $component references in change_country
     new_country =
       Regex.replace(~r/\$(\w+)/, replacement, fn _full, component ->
-        case component do
-          "state" -> address.state || ""
-          "city" -> address.city || ""
-          "county" -> address.county || ""
-          _ -> ""
-        end
+        Map.get(bindings, component, "")
       end)
 
-    %{address | territory: new_country}
+    Map.put(bindings, "country", new_country)
   end
 
-  defp apply_change_country(address, _config), do: address
+  defp apply_change_country_bindings(bindings, _config), do: bindings
 
   # ── Binding construction ───────────────────────────────────────
 
@@ -209,6 +214,8 @@ defmodule Localize.Address.Formatter do
     address
     |> Map.from_struct()
     |> Map.delete(:raw_input)
+    |> Map.delete(:territory)
+    |> Map.delete(:territory_code)
     |> Map.put(:country, address.territory)
     |> Map.put(:country_code, address.territory_code)
     |> Enum.reject(fn {_key, value} -> is_nil(value) || value == "" end)
@@ -230,6 +237,72 @@ defmodule Localize.Address.Formatter do
     end)
   end
 
+  # Clean component values per the Perl reference's _sanity_cleaning:
+  # reject postcodes that are too long or contain semicolons, and
+  # remove values that contain URLs or other obvious garbage.
+  defp sanitize_components(bindings) do
+    bindings
+    |> Map.new(fn {key, value} ->
+      if is_binary(value) && String.match?(value, ~r{https?://}) do
+        {key, ""}
+      else
+        {key, value}
+      end
+    end)
+    |> Map.reject(fn {_key, value} -> value == "" end)
+  end
+
+  defp sanitize_postcode(bindings) do
+    case Map.get(bindings, "postcode") do
+      nil ->
+        bindings
+
+      postcode ->
+        cond do
+          String.length(postcode) > 20 ->
+            Map.delete(bindings, "postcode")
+
+          String.match?(postcode, ~r/\d+;\d+/) ->
+            Map.delete(bindings, "postcode")
+
+          match = Regex.run(~r/^(\d{5}),\d{5}/, postcode) ->
+            Map.put(bindings, "postcode", Enum.at(match, 1))
+
+          true ->
+            bindings
+        end
+    end
+  end
+
+  # Washington DC is both a city and a state. When the state field contains
+  # "Washington DC" or "Washington, D.C.", split it into city + state_code.
+  defp normalize_washington_dc(bindings, territory_code)
+       when territory_code in ["US", "VI", "GU", "AS", "MP", "PR"] do
+    case Map.get(bindings, "state") do
+      "Washington DC" ->
+        bindings
+        |> Map.put_new("city", "Washington")
+        |> Map.put("state_code", "DC")
+        |> Map.put("state", "District of Columbia")
+
+      "Washington, D.C." ->
+        bindings
+        |> Map.put_new("city", "Washington")
+        |> Map.put("state_code", "DC")
+        |> Map.put("state", "District of Columbia")
+
+      "District of Columbia" ->
+        bindings
+        |> Map.put_new("city", "Washington")
+        |> Map.put("state_code", "DC")
+
+      _ ->
+        bindings
+    end
+  end
+
+  defp normalize_washington_dc(bindings, _territory_code), do: bindings
+
   # Derive state_code from state name using reverse lookup.
   # Also checks the parent country's codes if the territory uses use_country.
   defp add_state_code(bindings, territory_code, data) do
@@ -240,18 +313,20 @@ defmodule Localize.Address.Formatter do
     cond do
       Map.has_key?(bindings, "state_code") ->
         # Already has state_code; also populate state name if missing
-        if state_codes && !Map.has_key?(bindings, "state") do
-          code = bindings["state_code"]
-          name = Map.get(state_codes, code)
-          if name, do: Map.put(bindings, "state", name), else: bindings
-        else
-          bindings
-        end
+        bindings = populate_state_name(bindings, state_codes, territory_code)
+        bindings
 
-      state_codes && Map.has_key?(bindings, "state") ->
+      Map.has_key?(bindings, "state") ->
         state_name = bindings["state"]
-        # Build reverse lookup: name -> code
-        code = reverse_lookup(state_codes, state_name)
+
+        # Try OpenCageData state_codes first. Only use Localize fallback
+        # when the territory has state_codes data (meaning it actually
+        # uses abbreviated state codes in addresses).
+        code =
+          if state_codes do
+            reverse_lookup(state_codes, state_name) ||
+              subdivision_code_from_name(territory_code, state_name)
+          end
 
         if code do
           Map.put(bindings, "state_code", code)
@@ -262,6 +337,67 @@ defmodule Localize.Address.Formatter do
       true ->
         bindings
     end
+  end
+
+  # If state_code is set but state name is not, look up the full name
+  defp populate_state_name(bindings, state_codes, territory_code) do
+    if Map.has_key?(bindings, "state") do
+      bindings
+    else
+      code = bindings["state_code"]
+
+      name =
+        if state_codes do
+          case Map.get(state_codes, code) do
+            name when is_binary(name) -> name
+            %{"default" => name} -> name
+            _ -> nil
+          end
+        end
+
+      name = name || subdivision_name_from_code(territory_code, code)
+      if name, do: Map.put(bindings, "state", name), else: bindings
+    end
+  end
+
+  # Use Localize to look up subdivision name from code
+  defp subdivision_name_from_code(territory_code, code) when is_binary(code) do
+    subdivision_atom =
+      String.to_atom(String.downcase(territory_code) <> String.downcase(code))
+
+    case Localize.Territory.subdivision_name(subdivision_atom, locale: :en) do
+      {:ok, name} -> name
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Use Localize to find subdivision code from name
+  defp subdivision_code_from_name(territory_code, name) when is_binary(name) do
+    territory_lower = String.downcase(territory_code)
+    prefix_len = String.length(territory_lower)
+
+    subdivisions =
+      Localize.SupplementalData.territory_subdivisions()
+      |> Map.get(String.to_atom(territory_code), [])
+
+    upper_name = String.upcase(name)
+
+    Enum.find_value(subdivisions, fn sub_atom ->
+      sub_str = Atom.to_string(sub_atom)
+      code_part = String.slice(sub_str, prefix_len..-1//1) |> String.upcase()
+
+      case Localize.Territory.subdivision_name(sub_atom, locale: :en) do
+        {:ok, sub_name} ->
+          if String.upcase(sub_name) == upper_name, do: code_part
+
+        _ ->
+          nil
+      end
+    end)
+  rescue
+    _ -> nil
   end
 
   # Derive county_code from county name using reverse lookup
@@ -336,30 +472,54 @@ defmodule Localize.Address.Formatter do
     end
   end
 
-  # Apply component-level replace rules (rules prefixed with "key=")
+  # Apply replace rules to component values. Rules with "key=" prefix
+  # apply only to the named component. Rules without a prefix apply
+  # to ALL component values (the Perl reference behavior).
   defp apply_component_replace(bindings, country_config) do
     replacements = Map.get(country_config, :replace, [])
 
     Enum.reduce(replacements, bindings, fn {pattern, replacement}, acc ->
       case Regex.named_captures(~r/^(?<key>\w+)=(?<re>.+)$/, pattern) do
         %{"key" => key, "re" => regex_str} ->
-          if Map.has_key?(acc, key) do
-            case Regex.compile(regex_str) do
-              {:ok, regex} ->
-                new_value = Regex.replace(regex, acc[key], replacement)
-                Map.put(acc, key, new_value)
-
-              {:error, _} ->
-                acc
-            end
-          else
-            acc
-          end
+          apply_regex_to_key(acc, key, regex_str, replacement)
 
         _ ->
-          acc
+          apply_regex_to_all(acc, pattern, replacement)
       end
     end)
+  end
+
+  defp apply_regex_to_key(bindings, key, regex_str, replacement) do
+    if Map.has_key?(bindings, key) do
+      case Regex.compile(regex_str, [:caseless]) do
+        {:ok, regex} ->
+          new_value = Regex.replace(regex, bindings[key], convert_backreferences(replacement))
+          Map.put(bindings, key, new_value)
+
+        {:error, _} ->
+          bindings
+      end
+    else
+      bindings
+    end
+  end
+
+  defp apply_regex_to_all(bindings, pattern, replacement) do
+    case Regex.compile(pattern, [:caseless]) do
+      {:ok, regex} ->
+        converted = convert_backreferences(replacement)
+
+        Map.new(bindings, fn {key, value} ->
+          if is_binary(value) do
+            {key, Regex.replace(regex, value, converted)}
+          else
+            {key, value}
+          end
+        end)
+
+      {:error, _} ->
+        bindings
+    end
   end
 
   # ── Template rendering ─────────────────────────────────────────
@@ -379,11 +539,7 @@ defmodule Localize.Address.Formatter do
     for {var_name, candidates} <- first_of, into: %{} do
       value =
         Enum.find_value(candidates, "", fn candidate ->
-          case Map.get(bindings, candidate) do
-            nil -> nil
-            "" -> nil
-            value -> value
-          end
+          resolve_candidate(candidate, bindings)
         end)
 
       {var_name, value}
@@ -391,6 +547,35 @@ defmodule Localize.Address.Formatter do
   end
 
   defp resolve_first_of(_, _bindings), do: %{}
+
+  # Simple candidate: single variable name
+  defp resolve_candidate(candidate, bindings) when is_binary(candidate) do
+    case Map.get(bindings, candidate) do
+      nil -> nil
+      "" -> nil
+      value -> value
+    end
+  end
+
+  # Compound candidate: a mini-template with multiple variables.
+  # Resolves all variables; returns nil if ANY required variable is missing.
+  defp resolve_candidate({:compound, template}, bindings) do
+    # Extract all variable names from the template
+    vars = Regex.scan(~r/\{\$(\w+)\}/, template) |> Enum.map(fn [_, name] -> name end)
+
+    # Check that at least one variable has a value
+    if Enum.any?(vars, fn var -> Map.get(bindings, var) not in [nil, ""] end) do
+      result =
+        Regex.replace(~r/\{\$(\w+)\}/, template, fn _full, var_name ->
+          Map.get(bindings, var_name, "")
+        end)
+        |> String.trim()
+
+      if result == "", do: nil, else: result
+    end
+  end
+
+  defp resolve_candidate(_, _bindings), do: nil
 
   # ── Post-processing ────────────────────────────────────────────
 
@@ -402,8 +587,11 @@ defmodule Localize.Address.Formatter do
         acc
       else
         case Regex.compile(pattern) do
-          {:ok, regex} -> Regex.replace(regex, acc, replacement)
-          {:error, _} -> acc
+          {:ok, regex} ->
+            Regex.replace(regex, acc, convert_backreferences(replacement))
+
+          {:error, _} ->
+            acc
         end
       end
     end)
@@ -414,41 +602,97 @@ defmodule Localize.Address.Formatter do
   defp apply_postformat_replace(text, replacements) when is_list(replacements) do
     Enum.reduce(replacements, text, fn {pattern, replacement}, acc ->
       case Regex.compile(pattern) do
-        {:ok, regex} -> Regex.replace(regex, acc, replacement)
-        {:error, _} -> acc
+        {:ok, regex} ->
+          Regex.replace(regex, acc, convert_backreferences(replacement))
+
+        {:error, _} ->
+          acc
       end
     end)
   end
 
   defp apply_postformat_replace(text, _), do: text
 
+  # OpenCageData uses Perl-style backreferences ($1, $2) but Elixir's
+  # Regex.replace/4 uses \\1, \\2. Convert at application time.
+  defp convert_backreferences(replacement) do
+    Regex.replace(~r/\$(\d+)/, replacement, "\\\\\\1")
+  end
+
   defp clean_output(text) do
     text
     |> String.split("\n")
-    |> Enum.map(&String.trim/1)
+    |> Enum.map(&clean_line/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.reject(&only_punctuation?/1)
     |> deduplicate_lines()
     |> Enum.join("\n")
-    |> String.replace(~r/[ ]{2,}/, " ")
-    |> String.replace(~r/,\s*,/, ",")
-    |> String.replace(~r/^[,\s]+|[,\s]+$/u, "")
     |> String.trim()
   end
 
-  defp deduplicate_lines(lines) do
-    {result, _seen} =
-      Enum.reduce(lines, {[], MapSet.new()}, fn line, {acc, seen} ->
-        normalized = String.downcase(String.trim(line))
+  defp clean_line(line) do
+    line
+    |> String.trim()
+    |> String.replace(~r/[ ]{2,}/, " ")
+    |> String.replace(~r/,\s*,+/, ",")
+    |> deduplicate_within_line()
+    |> String.replace(~r/^[,\s\-]+/, "")
+    |> String.replace(~r/[,\s\-]+$/, "")
+    |> String.trim()
+  end
 
-        if MapSet.member?(seen, normalized) do
-          {acc, seen}
-        else
-          {acc ++ [line], MapSet.put(seen, normalized)}
+  # Remove duplicate comma-separated segments within a single line.
+  # E.g., "Alhambra, Ermita, Ermita" → "Alhambra, Ermita"
+  # Exception: "New York" is allowed to repeat (per Perl reference).
+  defp deduplicate_within_line(line) do
+    parts = String.split(line, ",") |> Enum.map(&String.trim/1)
+
+    {result, _seen} =
+      Enum.reduce(parts, {[], MapSet.new()}, fn part, {acc, seen} ->
+        normalized = String.downcase(part)
+
+        cond do
+          normalized == "" ->
+            {acc, seen}
+
+          normalized == "new york" ->
+            {acc ++ [part], seen}
+
+          MapSet.member?(seen, normalized) ->
+            {acc, seen}
+
+          true ->
+            {acc ++ [part], MapSet.put(seen, normalized)}
         end
       end)
 
-    result
+    Enum.join(result, ", ")
+  end
+
+  # Only remove CONSECUTIVE duplicate lines, not all duplicates globally.
+  # This preserves valid repetitions like "New York" (city) and "New York"
+  # (state) on non-adjacent lines, while removing true adjacent duplicates
+  # like "Berlin" appearing twice in a row.
+  defp deduplicate_lines(lines) do
+    lines
+    |> Enum.chunk_while(
+      nil,
+      fn line, prev ->
+        normalized = String.downcase(String.trim(line))
+        prev_normalized = if prev, do: String.downcase(String.trim(prev)), else: nil
+
+        if prev_normalized && normalized == prev_normalized do
+          {:cont, prev}
+        else
+          if prev, do: {:cont, prev, line}, else: {:cont, line}
+        end
+      end,
+      fn
+        nil -> {:cont, nil}
+        acc -> {:cont, acc, nil}
+      end
+    )
+    |> Enum.reject(&is_nil/1)
   end
 
   defp only_punctuation?(line) do
@@ -514,17 +758,5 @@ defmodule Localize.Address.Formatter do
         _ -> {:halt, nil}
       end
     end)
-  end
-
-  @address_fields Address.__struct__()
-                  |> Map.from_struct()
-                  |> Map.keys()
-                  |> MapSet.new()
-
-  defp safe_to_atom(string) when is_binary(string) do
-    atom = String.to_atom(string)
-    if MapSet.member?(@address_fields, atom), do: atom, else: nil
-  rescue
-    _ -> nil
   end
 end

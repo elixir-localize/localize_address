@@ -90,34 +90,45 @@ defmodule Localize.Address.OpenCageTest do
     end
 
     defp build_address_from_components(components, country_code) do
-      fields =
+      # First pass: map direct (non-aliased) component names to struct fields
+      direct_fields =
         Enum.reduce(components, %{}, fn {key, value}, acc ->
+          struct_field = Map.get(@canonical_to_struct, key)
+          if struct_field, do: Map.put(acc, struct_field, value), else: acc
+        end)
+
+      # Second pass: map aliased component names, but only if the struct
+      # field was not already set by a direct mapping
+      fields =
+        Enum.reduce(components, direct_fields, fn {key, value}, acc ->
           canonical = Map.get(@component_aliases, key, key)
           struct_field = Map.get(@canonical_to_struct, canonical)
 
           if struct_field do
-            Map.put(acc, struct_field, value)
+            Map.put_new(acc, struct_field, value)
           else
             acc
           end
         end)
 
-      # Ensure country_code is set
       fields = Map.put_new(fields, :territory_code, country_code)
-
       struct(Address, fields)
     end
 
     defp build_extended_bindings(components) do
-      # Build a map of ALL component values (including aliases) for the formatter,
-      # since templates reference both canonical and non-canonical field names
-      Enum.reduce(components, %{}, fn {key, value}, acc ->
-        # Store under the original key
-        acc = Map.put(acc, key, value)
+      # First pass: store all components under their original key
+      direct = Map.new(components)
 
-        # Also store under the canonical name
+      # Second pass: add canonical aliases, but only if the canonical
+      # key was not already provided directly in the components
+      Enum.reduce(components, direct, fn {key, value}, acc ->
         canonical = Map.get(@component_aliases, key, key)
-        Map.put(acc, canonical, value)
+
+        if canonical != key do
+          Map.put_new(acc, canonical, value)
+        else
+          acc
+        end
       end)
     end
 
