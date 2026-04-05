@@ -21,6 +21,8 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
   @components_url "https://raw.githubusercontent.com/OpenCageData/address-formatting/master/conf/components.yaml"
   @state_codes_url "https://raw.githubusercontent.com/OpenCageData/address-formatting/master/conf/state_codes.yaml"
   @county_codes_url "https://raw.githubusercontent.com/OpenCageData/address-formatting/master/conf/county_codes.yaml"
+  @testcases_index_url "https://api.github.com/repos/OpenCageData/address-formatting/contents/testcases/countries"
+  @testcases_raw_base "https://raw.githubusercontent.com/OpenCageData/address-formatting/master/testcases/countries"
 
   @output_path "priv/address_templates.etf"
 
@@ -57,18 +59,26 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
     default_config = Map.get(worldwide, "default", %{})
     compiled_default = compile_country(default_config, generics, fallbacks)
 
+    Mix.shell().info("Downloading test cases...")
+    testcases = download_testcases()
+
     data = %{
       countries: compiled_countries,
       default: compiled_default,
       component_aliases: component_aliases,
       state_codes: state_codes,
-      county_codes: county_codes
+      county_codes: county_codes,
+      testcases: testcases
     }
 
     File.mkdir_p!(Path.dirname(@output_path))
     File.write!(@output_path, :erlang.term_to_binary(data))
 
-    Mix.shell().info("Wrote #{map_size(compiled_countries)} country templates to #{@output_path}")
+    total_tests = Enum.reduce(testcases, 0, fn {_, cases}, acc -> acc + length(cases) end)
+
+    Mix.shell().info(
+      "Wrote #{map_size(compiled_countries)} country templates and #{total_tests} test cases to #{@output_path}"
+    )
   end
 
   defp download!(url) do
@@ -95,17 +105,20 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
   end
 
   defp build_component_aliases(components_list) do
-    for component_map <- components_list,
-        {name, config} <- component_map,
-        is_map(config),
-        reduce: %{} do
-      acc ->
-        aliases = Map.get(config, "aliases", [])
+    Enum.reduce(components_list, %{}, fn component_map, acc ->
+      name = Map.get(component_map, "name")
+      aliases = Map.get(component_map, "aliases", [])
 
-        Enum.reduce(aliases, Map.put(acc, name, name), fn alias_name, inner_acc ->
+      if name do
+        acc = Map.put(acc, name, name)
+
+        Enum.reduce(aliases, acc, fn alias_name, inner_acc ->
           Map.put(inner_acc, alias_name, name)
         end)
-    end
+      else
+        acc
+      end
+    end)
   end
 
   defp partition_templates(worldwide) do
@@ -151,7 +164,7 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
       replace: compile_replace(Map.get(config, "replace", [])),
       postformat_replace: compile_replace(Map.get(config, "postformat_replace", [])),
       use_country: Map.get(config, "use_country"),
-      add_component: Map.get(config, "add_component", []),
+      add_component: compile_add_component(Map.get(config, "add_component")),
       change_country: Map.get(config, "change_country")
     }
   end
@@ -233,6 +246,11 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
 
   defp compile_replace(replacements) when is_list(replacements) do
     Enum.flat_map(replacements, fn
+      # Two-element list: [pattern, replacement]
+      [pattern, replacement] when is_binary(pattern) ->
+        [{pattern, replacement || ""}]
+
+      # Map format: %{pattern => replacement}
       replacement when is_map(replacement) ->
         Enum.map(replacement, fn {pattern, replacement_text} ->
           {pattern, replacement_text || ""}
@@ -244,4 +262,92 @@ defmodule Mix.Tasks.Localize.Address.DownloadTemplates do
   end
 
   defp compile_replace(_), do: []
+
+  defp compile_add_component(nil), do: []
+
+  defp compile_add_component(value) when is_binary(value) do
+    parse_add_component_string(value)
+  end
+
+  defp compile_add_component(values) when is_list(values) do
+    Enum.flat_map(values, fn
+      value when is_binary(value) -> parse_add_component_string(value)
+      value when is_map(value) -> [value]
+      _ -> []
+    end)
+  end
+
+  defp compile_add_component(_), do: []
+
+  defp parse_add_component_string(string) do
+    case String.split(string, "=", parts: 2) do
+      [key, value] -> [%{key => value}]
+      _ -> []
+    end
+  end
+
+  defp download_testcases do
+    headers = [
+      {~c"User-Agent", ~c"localize-address"}
+    ]
+
+    {:ok, {{_, 200, _}, _, body}} =
+      :httpc.request(
+        :get,
+        {String.to_charlist(@testcases_index_url), headers},
+        [{:ssl, ssl_options()}],
+        []
+      )
+
+    entries =
+      body
+      |> IO.iodata_to_binary()
+      |> :json.decode()
+      |> Enum.map(fn entry -> entry["name"] end)
+      |> Enum.filter(fn name -> String.ends_with?(name, ".yaml") end)
+
+    Mix.shell().info("Found #{length(entries)} test case files")
+
+    for file <- entries, reduce: %{} do
+      acc ->
+        country_code =
+          file
+          |> String.trim_trailing(".yaml")
+          |> String.upcase()
+
+        url = "#{@testcases_raw_base}/#{file}"
+
+        case :httpc.request(:get, {String.to_charlist(url), []}, [{:ssl, ssl_options()}], []) do
+          {:ok, {{_, 200, _}, _, file_body}} ->
+            yaml_content = IO.iodata_to_binary(file_body)
+            cases = parse_testcases(yaml_content, country_code)
+            Map.put(acc, country_code, cases)
+
+          _ ->
+            acc
+        end
+    end
+  end
+
+  defp parse_testcases(yaml_content, country_code) do
+    yaml_content
+    |> YamlElixir.read_all_from_string!()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(fn testcase ->
+      components = Map.get(testcase, "components", %{})
+
+      %{
+        description: Map.get(testcase, "description", ""),
+        components: normalize_component_values(components),
+        expected: String.trim(Map.get(testcase, "expected", "")),
+        country_code: country_code
+      }
+    end)
+  end
+
+  defp normalize_component_values(components) do
+    Map.new(components, fn {key, value} ->
+      {key, to_string(value)}
+    end)
+  end
 end
