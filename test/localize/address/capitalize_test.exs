@@ -29,11 +29,6 @@ defmodule Localize.Address.CapitalizeTest do
       assert result.continent == "North America"
     end
 
-    # TODO: Unicode.String.titlecase/2 has a bug where words starting
-    # with "i" are not titlecased (e.g., "island" stays lowercase).
-    # These assertions should pass once the bug is fixed upstream.
-    # See: https://github.com/elixir-unicode/unicode_string
-    @tag :skip
     test "titlecases words starting with i" do
       address = %A{
         attention: "acme international",

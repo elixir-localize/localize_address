@@ -14,11 +14,10 @@ defmodule Localize.Address.RoundtripTest do
   alias Localize.Address
   alias Localize.Address.Address, as: A
 
-  @tag :nif
-  @tag :templates
-
   describe "format → parse → format roundtrip" do
-    @tag :nif
+    @describetag :nif
+    @describetag :templates
+
     test "US address preserves components" do
       original = %A{
         house_number: "301",
