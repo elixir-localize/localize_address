@@ -9,7 +9,7 @@ defmodule Localize.Address.RoundtripTest do
   reformatted output is structurally similar to the original.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Localize.Address
   alias Localize.Address.Address, as: A

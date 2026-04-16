@@ -1,5 +1,5 @@
 defmodule Localize.Address.CapitalizeTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Localize.Address
   alias Localize.Address.Address, as: A

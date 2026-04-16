@@ -73,12 +73,12 @@ defmodule Localize.Address.MixProject do
     [
       source_ref: "v#{@version}",
       main: "readme",
+      formatters: ["html", "markdown"],
       extras:
         [
           "README.md",
           "LICENSE.md",
-          "CHANGELOG.md",
-          "open_cage_conformance.md"
+          "CHANGELOG.md"
         ] ++ Path.wildcard("guides/*.md"),
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules(),

@@ -94,40 +94,6 @@ See the [Parsing and Formatting guide](https://hexdocs.pm/localize_address/parsi
 
 * **[Unicode.String](https://hex.pm/packages/unicode_string)** — Unicode-aware titlecase, used by `Localize.Address.capitalize/2`.
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                  Localize.Address                     │
-│         parse/2    to_string/2    capitalize/2        │
-└──────┬──────────────────┬────────────────────────────┘
-       │                  │
-       ▼                  ▼
-┌──────────────┐ ┌────────────────────────┐
-│ Localize.    │ │ Localize.Address.      │
-│ Address.Nif  │ │ Formatter              │
-│ (libpostal)  │ │                        │
-└──────────────┘ │ * Template resolution  │
-                 │ * Territory remapping  │
-                 │ * Component aliases    │
-                 │ * State code lookup    │
-                 │ * First-of resolution  │
-                 │ * Replace rules        │
-                 │ * Postformat rules     │
-                 │ * Output cleanup       │
-                 └────────┬───────────────┘
-                          │
-                 ┌────────▼───────────────┐
-                 │ priv/address_templates  │
-                 │        .etf            │
-                 │ (compiled templates,   │
-                 │  state/county codes,   │
-                 │  component aliases)    │
-                 └────────────────────────┘
-```
-
-The formatter pipeline is documented in detail in the [Parsing and Formatting guide](https://hexdocs.pm/localize_address/parsing_and_formatting.html).
-
 ## Conformance
 
 Validated against the full [OpenCageData test suite](https://github.com/OpenCageData/address-formatting/tree/master/testcases) (459 test cases across 251 countries and territories).
