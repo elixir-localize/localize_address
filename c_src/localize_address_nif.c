@@ -2,6 +2,12 @@
 #include <string.h>
 #include <libpostal/libpostal.h>
 
+/* ── Mutex for thread safety ──────────────────────────────────── */
+
+/* libpostal is not thread-safe for concurrent parse calls.
+ * We use an ErlNifMutex to serialize access. */
+static ErlNifMutex *parse_mutex = NULL;
+
 /* ── Cached atoms ──────────────────────────────────────────────── */
 
 static ERL_NIF_TERM atom_ok;
@@ -55,8 +61,13 @@ nif_parse(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         options.language = language;
     }
 
+    /* Serialize access to libpostal which is not thread-safe */
+    enif_mutex_lock(parse_mutex);
+
     libpostal_address_parser_response_t *response =
         libpostal_parse_address(address, options);
+
+    enif_mutex_unlock(parse_mutex);
 
     if (response == NULL) {
         return enif_make_tuple2(env, atom_error,
@@ -89,12 +100,21 @@ on_load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM info)
     atom_ok = enif_make_atom(env, "ok");
     atom_error = enif_make_atom(env, "error");
 
+    parse_mutex = enif_mutex_create("localize_address_parse");
+    if (parse_mutex == NULL) {
+        return -1;
+    }
+
     if (!libpostal_setup()) {
+        enif_mutex_destroy(parse_mutex);
+        parse_mutex = NULL;
         return -1;
     }
 
     if (!libpostal_setup_parser()) {
         libpostal_teardown();
+        enif_mutex_destroy(parse_mutex);
+        parse_mutex = NULL;
         return -1;
     }
 
@@ -109,6 +129,11 @@ on_unload(ErlNifEnv *env, void *priv_data)
 
     libpostal_teardown_parser();
     libpostal_teardown();
+
+    if (parse_mutex != NULL) {
+        enif_mutex_destroy(parse_mutex);
+        parse_mutex = NULL;
+    }
 }
 
 static int
