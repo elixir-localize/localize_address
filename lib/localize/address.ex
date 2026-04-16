@@ -181,7 +181,7 @@ defmodule Localize.Address do
         case Map.get(acc, field) do
           nil -> acc
           "" -> acc
-          value -> Map.put(acc, field, Unicode.String.titlecase(value, titlecase_options))
+          value -> Map.put(acc, field, capitalize_value(value, titlecase_options))
         end
       end)
 
@@ -190,6 +190,27 @@ defmodule Localize.Address do
       "" -> updated
       postcode -> %{updated | postcode: String.upcase(postcode)}
     end
+  end
+
+  # Directional abbreviations common in US addresses that should
+  # remain uppercase after titlecasing.
+  @directional_pattern ~r/\b(Nw|Ne|Sw|Se)\b/
+
+  # Short values without spaces (e.g., "ca", "nsw", "fi") are
+  # abbreviations and should be uppercased. Longer values are
+  # titlecased with directional abbreviations corrected.
+  defp capitalize_value(value, titlecase_options) do
+    if String.length(value) <= 3 and not String.contains?(value, " ") do
+      String.upcase(value)
+    else
+      value
+      |> Unicode.String.titlecase(titlecase_options)
+      |> upcase_directionals()
+    end
+  end
+
+  defp upcase_directionals(value) do
+    Regex.replace(@directional_pattern, value, fn match, _ -> String.upcase(match) end)
   end
 
   @doc """

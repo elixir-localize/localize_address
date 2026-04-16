@@ -96,6 +96,20 @@ defmodule Localize.Address.CapitalizeTest do
       assert result.road == "Müller Straße"
       assert result.city == "München"
     end
+
+    test "Dutch locale titlecases IJ digraph" do
+      address = %A{
+        road: "ijsbaanpad",
+        neighbourhood: "ijburg",
+        city: "amsterdam"
+      }
+
+      result = Address.capitalize(address, locale: :nl)
+
+      assert result.road == "IJsbaanpad"
+      assert result.neighbourhood == "IJburg"
+      assert result.city == "Amsterdam"
+    end
   end
 
   describe "parse/2 with capitalize option" do

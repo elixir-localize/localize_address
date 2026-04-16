@@ -437,7 +437,7 @@ defmodule Localize.Address.Formatter do
     subdivision_atom =
       String.to_atom(String.downcase(territory_code) <> String.downcase(code))
 
-    case Localize.Territory.subdivision_name(subdivision_atom, locale: :en) do
+    case Localize.Territory.Subdivision.display_name(subdivision_atom, locale: :en) do
       {:ok, name} -> name
       _ -> nil
     end
@@ -449,23 +449,22 @@ defmodule Localize.Address.Formatter do
   defp subdivision_code_from_name(territory_code, name) when is_binary(name) do
     territory_lower = String.downcase(territory_code)
     prefix_len = String.length(territory_lower)
-
-    subdivisions =
-      Localize.SupplementalData.territory_subdivisions()
-      |> Map.get(String.to_atom(territory_code), [])
-
     upper_name = String.upcase(name)
 
-    Enum.find_value(subdivisions, fn sub_atom ->
+    Localize.Territory.Subdivision.known_subdivisions()
+    |> Enum.find_value(fn {sub_atom, _} ->
       sub_str = Atom.to_string(sub_atom)
-      code_part = String.slice(sub_str, prefix_len..-1//1) |> String.upcase()
 
-      case Localize.Territory.subdivision_name(sub_atom, locale: :en) do
-        {:ok, sub_name} ->
-          if String.upcase(sub_name) == upper_name, do: code_part
+      if String.starts_with?(sub_str, territory_lower) do
+        code_part = String.slice(sub_str, prefix_len..-1//1) |> String.upcase()
 
-        _ ->
-          nil
+        case Localize.Territory.Subdivision.display_name(sub_atom, locale: :en) do
+          {:ok, sub_name} ->
+            if String.upcase(sub_name) == upper_name, do: code_part
+
+          _ ->
+            nil
+        end
       end
     end)
   rescue

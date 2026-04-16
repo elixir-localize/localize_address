@@ -39,16 +39,16 @@ defmodule Localize.Address.OpenCageTest do
     # Tests that fail due to known edge cases documented in
     # open_cage_conformance.md. Run with: mix test --include known_failure
     @known_failures MapSet.new([
-      {"AT", 1},
-      {"CC", 0},
-      {"CN", 2},
-      {"HM", 0},
-      {"IR", 1},
-      {"KW", 3},
-      {"MT", 0},
-      {"PH", 1},
-      {"UG", 1}
-    ])
+                      {"AT", 1},
+                      {"CC", 0},
+                      {"CN", 2},
+                      {"HM", 0},
+                      {"IR", 1},
+                      {"KW", 3},
+                      {"MT", 0},
+                      {"PH", 1},
+                      {"UG", 1}
+                    ])
 
     for {country_code, testcases} <- @data.testcases,
         {testcase, index} <- Enum.with_index(testcases) do
